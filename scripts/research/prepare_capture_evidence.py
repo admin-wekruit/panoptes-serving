@@ -107,7 +107,8 @@ def objects(output, spec_path):
         result.append({'object_id': item['object_id'], 'label': item['label'], 'reference_frame': item['reference_frame'],
                        'source_inventory_indices': [], 'views': views,
                        'physical_identity': {'status': item.get('identity', 'single view' if len(views) == 1 else 'same physical object in each listed view (visual review)'),
-                                             'evidence': item.get('evidence', 'location and fixed details in both photographs'),
+                                             'evidence': item.get('evidence', 'one photograph only: identity not cross-checked' if len(views) == 1 else
+                                                                  f'location and fixed details in all {len(views)} listed photographs (visual review)'),
                                              'pairwise_visible_centroid_distances_native': distances}})
     path = output / 'evidence/objects.json'
     save_json(path, {'version': 1, 'coordinate_system': 'new joint Pi3X native OpenCV world', 'metric_scale_known': False,
