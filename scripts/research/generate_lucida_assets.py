@@ -256,6 +256,9 @@ def main():
     if deployed_app:
         import modal
         generate_object = modal.Function.from_name(deployed_app, 'generate_object')
+    # On-prem (scripts/onprem/run_stage.py sets PANOPTES_ONPREM=1) nothing is billed by Modal: the GPU budget gate is off;
+    # calls are still journaled in gpu-budget.json, marked onprem.
+    onprem=os.environ.get('PANOPTES_ONPREM')=='1'
     # ponytail: one experiment process owns a simple file lock and sequential calls; no queue/service.
     with (generation/'gpu-budget.lock').open('a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -271,7 +274,7 @@ def main():
             for obj in selected:
                 oid=obj['object_id'];out=generation/'variants/robot-source-crop' if args.source_crop else generation/oid
                 if out.exists():raise FileExistsError('Preserve existing generation: '+str(out))
-                if sum(c['charged_seconds'] for c in ledger['calls'])+630>ledger['limit_seconds']:
+                if not onprem and sum(c['charged_seconds'] for c in ledger['calls'])+630>ledger['limit_seconds']:
                     raise RuntimeError('Insufficient remaining GPU budget for a bounded 600-second object call')
                 payload,source=payload_for_object(root,obj,args.source_crop)
                 if args.source_crop:
@@ -291,7 +294,7 @@ def main():
                 call={'object_id':oid,'output_dir':str(out.relative_to(generation)),
                       'variant':'robot-source-crop' if args.source_crop else None,
                       'generation_input':source['generation_input'],
-                      'charged_seconds':630,'status':'reserved','seed':args.seed}
+                      'charged_seconds':630,'status':'reserved','seed':args.seed,**({'onprem':True} if onprem else {})}
                 ledger['calls'].append(call);saveledger()
                 begin=time.monotonic()
                 try:

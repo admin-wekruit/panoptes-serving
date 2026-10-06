@@ -5,14 +5,17 @@ around a legacy registry; this keeps their scene/report schema and reuses their 
 metrics) without the legacy mapping: original photographs, exact camera pixel maps, packed meshes, per-view mask polygons
 and plan hulls for the CAD view.
 
-  python scripts/research/build_capture_report.py --run outputs/candidate-evaluation/RUN --label TITLE
+  python scripts/research/build_capture_report.py --run outputs/candidate-evaluation/RUN --label TITLE [--pages-root DIR]
 Writes RUN/public/{scene.json, report.json, model/objects/*.bin.gz, images/frame_*.png, originals/*}.
+--pages-root (or $PANOPTES_PAGES_ROOT): a directory holding the Pages repository's pack-model.py and build-unified-data.py
+(on-prem: ship those two files with the code); default: the local panoptes-workcell-pages checkout.
 """
 import argparse
 import gzip
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -21,30 +24,33 @@ import sys
 import cv2
 import numpy as np
 
-PAGES = Path('/Users/adam/Desktop/panoptes-public/panoptes-workcell-pages')
+PAGES = Path(os.environ.get('PANOPTES_PAGES_ROOT', '/Users/adam/Desktop/panoptes-public/panoptes-workcell-pages'))
 
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def helpers():
-    spec = importlib.util.spec_from_file_location('unified', PAGES / 'build-unified-data.py')
+def helpers(pages):
+    spec = importlib.util.spec_from_file_location('unified', pages / 'build-unified-data.py')
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
 
-def build(run, label):
+def build(run, label, pages=PAGES):
     run = run.resolve(); out = run / 'public'
+    missing = [n for n in ('pack-model.py', 'build-unified-data.py') if not (pages / n).is_file()]
+    if missing:
+        raise FileNotFoundError(f'--pages-root {pages} lacks {missing}')
     if out.exists():
         raise ValueError('RUN/public already exists')
     out.mkdir()
-    u = helpers()
+    u = helpers(pages)
     manifest = json.loads((run / 'manifest.json').read_text())
     evidence = {o['object_id']: o for o in json.loads((run / 'evidence/objects.json').read_text())['objects']}
     floor = json.loads((run / 'evidence/floor.json').read_text())
     shutil.copyfile(run / 'result/scene.json', out / 'scene.json')
-    subprocess.run([sys.executable, str(PAGES / 'pack-model.py'), str(run / 'result'), str(out)], check=True)
+    subprocess.run([sys.executable, str(pages / 'pack-model.py'), str(run / 'result'), str(out)], check=True)
     scene = json.loads((out / 'scene.json').read_text())
     frames = {f['frame_id']: f for f in manifest['frames']}
     (out / 'images').mkdir(); (out / 'originals').mkdir()
@@ -110,5 +116,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', required=True, type=Path)
     parser.add_argument('--label', required=True)
+    parser.add_argument('--pages-root', type=Path, default=PAGES, help='directory with pack-model.py and build-unified-data.py')
     args = parser.parse_args()
-    build(args.run, args.label)
+    build(args.run, args.label, args.pages_root)
