@@ -23,7 +23,15 @@ import time
 import urllib.request
 
 sys.path.insert(0, str(Path.cwd()))
-os.environ.update(json.loads(Path('.platform/identity-runtime-env.json').read_text()))
+# Platform configuration: the environment (.env of the handoff: PANOPTES_DATABASE_URL postgres:// or mongodb://, PANOPTES_BLOB_ROOT
+# directory or s3://, PANOPTES_PAID_BUDGET_USD, PANOPTES_BLENDER_EXECUTABLE) wins; the original machine's .platform/identity-runtime-env.json
+# fills in whatever the environment does not set.
+_env_file = Path('.platform/identity-runtime-env.json')
+if _env_file.exists():
+    for _k, _v in json.loads(_env_file.read_text()).items():
+        os.environ.setdefault(_k, _v)
+if not os.environ.get('PANOPTES_DATABASE_URL'):
+    raise SystemExit('PANOPTES_DATABASE_URL is not set (export it or put it in .env)')
 from ehs_spatial.platform.config import PlatformConfig  # noqa: E402
 from ehs_spatial.platform.runtime import services  # noqa: E402
 from scripts.import_public_scene import run_import  # noqa: E402

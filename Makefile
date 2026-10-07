@@ -15,9 +15,11 @@ CODE_SHA = $(shell git rev-parse HEAD)
 PORT_a = 8805
 PORT_b = 8804
 
-.PHONY: test context images up down logs smoke
+.PHONY: test-contract context images up down logs smoke
 
-test:
+include Makefile.handoff   # env, check-env, check-env-live, lint, test (whole offline suite), run CELL=…
+
+test-contract:
 	$(PY) -m pytest tests/contract -q
 
 context:

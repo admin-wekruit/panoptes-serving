@@ -14,6 +14,24 @@ import pytest
 
 WORKCELL = Path(os.environ.get('PANOPTES_WORKCELL', '/nonexistent'))
 pytestmark = pytest.mark.skipif(not (WORKCELL / 'modal_apps/geometry_clean_ab.py').is_file(), reason='PANOPTES_WORKCELL not set')
+
+
+@pytest.fixture(autouse=True)
+def _isolated_modules():
+    """These tests install the on-prem Modal stub and import the real run_stage / geometry modules; give every other test the
+    interpreter state it started with (the provider tests assert that run_stage / modal are not pre-imported)."""
+    before, path = dict(sys.modules), list(sys.path)
+    for name in [k for k in sys.modules if k == 'modal' or k.startswith('modal.')]:   # the real client, if another test imported it:
+        del sys.modules[name]                                                        # use_stub() must be able to install the stub
+    yield
+    for name in [k for k in sys.modules if k not in before]:
+        del sys.modules[name]
+    for name in ('modal', 'run_stage', 'torch'):
+        if name in before:
+            sys.modules[name] = before[name]
+        else:
+            sys.modules.pop(name, None)
+    sys.path[:] = path
 cv2 = pytest.importorskip('cv2')
 pytest.importorskip('scipy')
 H = W = 64

@@ -15,7 +15,9 @@ DATA = ROOT / "research/module-swap-2026-10-07/data"
 
 
 def panoptes(*args, env=None, tmp=None):
-    extra = {"PANOPTES_PAGES": str(tmp / "pages")} if tmp else {}
+    # a private platform / workcell root: S7's done-check looks at $PANOPTES_PLATFORM/.platform/swap-20261007/<variant>/result.json,
+    # which exists on the machine that published the reports (and PANOPTES_WORKCELL may point at that checkout)
+    extra = {"PANOPTES_PAGES": str(tmp / "pages"), "PANOPTES_PLATFORM": str(tmp / "platform"), "PANOPTES_WORKCELL": str(tmp / "workcell")} if tmp else {}
     return subprocess.run([sys.executable, "-m", "ehs_spatial.cli", *args], cwd=ROOT, capture_output=True, text=True,
                           env={**os.environ, **extra, **(env or {})})
 

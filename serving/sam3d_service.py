@@ -45,15 +45,24 @@ class Sam3dRequest(BaseModel):
 
 # ---------------------------------------------------------------- the model
 def load_model():
-    """SAM3DObjects through the run_stage stub; returns the stub-wrapped instance, loaded now (not on the first request)."""
-    v1.verify_weights(service.entry)  # registry.yaml pins; a mismatch refuses to start
+    """SAM3DObjects through the run_stage stub; returns the stub-wrapped instance, loaded now (not on the first request).
+    PANOPTES_WEIGHTS_MODE=manifest (default): the fetch_weights_sam3d.py cache at WEIGHTS, SHA-256 verified against registry.yaml,
+    linked into HF_HOME / torch hub by run_stage. PANOPTES_WEIGHTS_MODE=hf-cache: HF_HOME and the torch hub checkpoint directory are
+    already in place (a baked image, a pre-mounted cache, a GPU host that already serves the other models); nothing is linked or
+    verified here, the model's own snapshot_download(revision=...) still pins the revision."""
+    mode = os.environ.get('PANOPTES_WEIGHTS_MODE', 'manifest')
+    if mode == 'manifest':
+        v1.verify_weights(service.entry)  # registry.yaml pins; a mismatch refuses to start
     workcell = Path(os.environ.get('PANOPTES_WORKCELL', '/workcell'))
     sys.path.insert(0, str(workcell / 'scripts/onprem'))
     import run_stage  # the on-prem runner: modal stub, torch.hub pin, weights overlay
     run_stage.use_stub()
-    run_stage.pin_torch_hub()
     os.environ.update(HF_HUB_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', PANOPTES_ONPREM='1')
-    run_stage.link_weights(v1.weights_dir())  # HF_HOME -> the cache, /opt/torch-hub/hub/checkpoints -> the DINOv2 file
+    if mode == 'manifest':
+        run_stage.pin_torch_hub()
+        run_stage.link_weights(v1.weights_dir())  # HF_HOME -> the cache, /opt/torch-hub/hub/checkpoints -> the DINOv2 file
+    elif mode != 'hf-cache':
+        raise SystemExit(f'PANOPTES_WEIGHTS_MODE={mode!r}: manifest | hf-cache')
     sys.path.insert(0, str(workcell / 'modal_apps'))
     import torch
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False  # registry seed_policy
