@@ -32,7 +32,7 @@ cd $N/geometry-backbone-ab-2026-10-06
 [ -f $SP/checks/bbab-analyse/$CELL-mvs-fill-padded.json ] || ${=MODAL_RUN} backbone_ab_modal.py analyse $CELL-mvs-fill-padded 2>&1 | tail -2
 [ -d $SP/checks/bbab-export-$CELL-mvs-fill ] || $PY backbone_ab_modal.py export mvs-fill $CELL 2>&1 | tail -1
 cd $N/module-swap-090-2026-10-07 && $PY field_values_fill.py 2>&1 | tail -2
-$PY - <<'EOF'
+"$PY" - <<'EOF'
 import json, os
 f = json.load(open('field-values-mvs-fill.json')); a, b = f['mvs-da3-base'], f['mvs-fill']
 for k in ('housing090R_cm', 'fence090R_cm', 'housing030L_cm', 'housing030R_cm', 'estopNativeToMeters090', 'estopNativeToMeters030'):
