@@ -14,6 +14,7 @@ Generation input for TRELLIS and SAM 3D: the photo with the object's largest mas
   $M run completion_ab.py --stage trellis --variants trellis2v   # the same from every photo's crop (run_multi_image, stochastic)
   $M run completion_ab.py --stage sam3d      # SAM3DObjects (A100), six posed meshes
   AB_RUN=RUN AB_OUT=OUT AB_OBJECTS=a,b AB_FRAME=all $M run completion_ab.py --stage sam3d   # any run; every photo of each object
+  SAM3D_BACKEND=http|local|modal ... --stage sam3d   # the candidates through ehs_spatial.providers.sam3d (docs/BACKENDS-v1.md) instead of the class here
   AB_RUN=RUN AB_OUT=OUT AB_OBJECTS=a,b $M run completion_ab.py --stage assemble --variants sam3d,sam3d-frame_0001,...
   $M run completion_ab.py --stage assemble   # CPU: initial poses + assemble() for recgen / trellis / sam3d
 """
@@ -357,7 +358,11 @@ def stage_sam3d(frame_id=None):
     objects = {o['object_id']: o for o in json.loads((RUN / 'evidence/objects.json').read_text())['objects']}
     dest = OUT / ('sam3d-' + frame_id if frame_id else 'sam3d')
     dest.mkdir(parents=True, exist_ok=True)
-    model = sam3d_research.SAM3DObjects()
+    backend = os.environ.get('SAM3D_BACKEND')  # set: ehs_spatial.providers.sam3d (http service | local | modal); unset: the Modal class as before
+    if backend:
+        sys.path.insert(0, str(SERVING))
+        from ehs_spatial.providers import sam3d as sam3d_provider
+    model = None if backend else sam3d_research.SAM3DObjects()
     log = json.loads((dest / 'record.json').read_text()) if (dest / 'record.json').exists() else {'objects': {}}
     for oid in OBJECTS:
         if (dest / f'{oid}.npz').exists():
@@ -366,15 +371,17 @@ def stage_sam3d(frame_id=None):
             continue  # no such photo, or it is the default generation photo (already in sam3d/)
         rgb, mask, pointmap, meta = sam3d_inputs(objects[oid], manifest, frame_id=frame_id)
         t = time.monotonic()
-        out = model.run.remote(rgb, mask, pointmap, 42)
+        out = sam3d_provider.generate(rgb, mask, pointmap, 42) if backend else model.run.remote(rgb, mask, pointmap, 42)
         meta['call_seconds'] = time.monotonic() - t
         if 'error' in out:
             meta.update(error=out['error'][-3000:], seconds=out['seconds'])
             print(oid, 'error', out['error'][-800:])
         else:
             np.savez_compressed(dest / f'{oid}.npz', vertices=out['vertices'], faces=out['faces'].astype(np.int32), colors=out['colors'],
-                                object_to_camera_p3d=out['objectToCamera'])
+                                object_to_camera_p3d=out['object_to_camera_p3d' if backend else 'objectToCamera'])
             meta.update(seconds=out['seconds'], gpu=out['gpu'], pins=out['pins'], vertices=len(out['vertices']), faces=len(out['faces']))
+            if backend:
+                meta.update(backend=backend, model_info=out.get('model_info'))
             print(oid, len(out['faces']), 'faces', round(out['seconds'], 1), 's')
         log['objects'][oid] = meta
         (dest / 'record.json').write_text(json.dumps(log, indent=1))
