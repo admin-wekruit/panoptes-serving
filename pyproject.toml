@@ -23,6 +23,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest==9.1.1"]
 
+[project.scripts]
+panoptes = "ehs_spatial.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["ehs_spatial*"]
 

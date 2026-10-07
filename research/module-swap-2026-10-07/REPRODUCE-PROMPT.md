@@ -48,7 +48,11 @@ cd panoptes-serving/research/module-swap-2026-10-07
 ./run_all.sh 090      # 约 40 分钟（SAM 3D 25 个候选 ≈ 5 分钟 GPU，其余 CPU）
 ./run_all.sh 030      # 约 25 分钟
 ```
-每步幂等，中断后重跑接着来。它做的事（和 `notes/module-swap-090-2026-10-07/RUNBOOK.md` 的 S1–S14 一一对应）：
+每步幂等，中断后重跑接着来。`run_all.sh` 原样保留作参考；同样的步骤、脚本和跳过规则也有 CLI（`ehs_spatial/cli.py`，`uv sync` 后在 PATH 上）：
+`panoptes run --cell 090 [--from S4a] [--only S2a] [--dry-run]`（`--dry-run` 只列步骤、完成状态和命令），`panoptes status --cell 090`；
+每跑一步追加 `data/swap-runs/<cell>/ledger.json`（输入 sha256、起止时间、后端、模型 `model_info`、主机）。设 `SAM3D_BACKEND` / `GEOMETRY_MVS_BACKEND`=`http`
+（`env.template`，`docs/BACKENDS-v1.md`）时 S4a / S2a 走 GPU 模型服务而不是本机 run_stage；不设则与 `run_all.sh` 完全一致。
+它做的事（和 `notes/module-swap-090-2026-10-07/RUNBOOK.md` 的 S1–S14 一一对应）：
 
 | 步 | 做什么 | GPU |
 |---|---|---|
