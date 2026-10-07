@@ -7,3 +7,4 @@ __pycache__/
 runs/
 /outputs/
 .DS_Store
+build-context/
