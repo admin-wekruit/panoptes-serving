@@ -182,9 +182,22 @@ def score_view(mesh, transform, view):
             'loss': float(1 - iou + 2 * boundary + min(p50 if p50 is not None else 1, 1))}
 
 
-def refine(mesh, initial, views, max_iterations=100):
+FLOOR_CONTACT_WEIGHT = 2.0
+
+
+def floor_penalty(vertices, plane, weight=FLOOR_CONTACT_WEIGHT):
+    """One floor for every object, no per-object rules: a hinge on the lowest point (0.5th-percentile height, the report's
+    'lowest point') below the floor plane, normalised by the object's own height so it is unit-free. Nothing pulls an object
+    down: mounted objects (robot, guard, light curtains) may float; nothing may sink. plane = [nx, ny, nz, d], height = X.n + d."""
+    h = vertices @ plane[:3] + plane[3]
+    lowest = float(np.percentile(h, 0.5))
+    return weight * max(0.0, -lowest) / max(float(np.ptp(h)), 1e-6), lowest
+
+
+def refine(mesh, initial, views, max_iterations=100, floor=None):
     extent = np.ptp(transformed(mesh.vertices, initial), axis=0)
     radius = max(float(np.linalg.norm(extent)), 1e-4)
+    floor = None if floor is None else np.asarray(floor, float)
     initial_parts = decompose(initial)
     initial_rotation = Rotation.from_euler('xyz', initial_parts['rotation_deg'], degrees=True).as_matrix()
     initial_scale = np.array(initial_parts['scale'])
@@ -195,7 +208,9 @@ def refine(mesh, initial, views, max_iterations=100):
         return result
     def score(transform):
         per_view = {view['frame_id']: score_view(mesh, transform, view) for view in views}
-        return {'loss': float(np.mean([value['loss'] for value in per_view.values()])), 'views': per_view}
+        penalty, lowest = floor_penalty(transformed(mesh.vertices, transform), floor) if floor is not None else (0.0, None)
+        return {'loss': float(np.mean([value['loss'] for value in per_view.values()]) + penalty), 'views': per_view,
+                'floor': {'penalty': penalty, 'lowest_native': lowest}}
     initial_score = score(initial)
     records = []
     def objective(x):
@@ -215,6 +230,8 @@ def refine(mesh, initial, views, max_iterations=100):
     # No transform with shear may enter the editable scene contract.
     decompose(final)
     return final, {'method': 'bounded multi-view CPU render-and-compare; not GizmoAct', 'training_frames': [v['frame_id'] for v in views],
+                   'floor_contact': None if floor is None else {'weight': FLOOR_CONTACT_WEIGHT, 'plane_native': floor.tolist(),
+                                                                 'rule': 'hinge on the 0.5th-percentile height below the floor, / object height; sinking only'},
                    'seconds': time.perf_counter() - start, 'evaluations': len(records),
                    'initial': initial_score, 'final': score(final), 'trajectory': records}
 
@@ -672,7 +689,11 @@ def observed_self_check(ehs_repo):
         assert validation['status']=='unavailable' and len(scene['unavailable_regions'])==3
         assert scene['objects']==[] and scene['bounds'] is None
         assert not (empty/'scene.bin').exists() and not (empty/'scene.glb').exists()
-    print('PASS: observed-only shared core; partial frames, source cameras, real floor, unknown floor and empty geometry; zero model calls')
+    cube = np.array([[x, y, z] for x in (0., 1.) for y in (0., 1.) for z in (0., 1.)]) * [1, 2, 1]  # 2 units tall, floor y = 0
+    assert floor_penalty(cube, np.array([0., 1., 0., 0.]))[0] == 0.0, 'resting on the floor is free'
+    assert floor_penalty(cube + [0, 5, 0], np.array([0., 1., 0., 0.]))[0] == 0.0, 'floating is not penalised'
+    assert abs(floor_penalty(cube - [0, .2, 0], np.array([0., 1., 0., 0.]))[0] - FLOOR_CONTACT_WEIGHT * .1) < 1e-9, 'sunk 10 % of height'
+    print('PASS: observed-only shared core; partial frames, source cameras, real floor, unknown floor and empty geometry; zero model calls; floor hinge')
 
 
 def assemble(root, iterations=100, eval_size=288):
@@ -714,7 +735,7 @@ def assemble(root, iterations=100, eval_size=288):
             raise ValueError(f'Native raw/posed asset disagreement: {object_id}')
         print(f'Refining {object_id}: {len(mesh.faces)} faces, anchor {reference_id}', flush=True)
         fitting_views = [load_view(root, view['spec'], fit_height) for view in views]
-        final, refinement = refine(mesh, initial, fitting_views, iterations)
+        final, refinement = refine(mesh, initial, fitting_views, iterations, floor=floor['plane_native'])
         partial = trimesh.util.concatenate([observed_mesh(v) for v in views])
         per_view = []
         for view in views:
