@@ -1,117 +1,86 @@
-# 复现 prompt：工位照片 → 可商用三维报告（MVS + 补洞 + SAM 3D + 组装 v2），内部 GPU 环境
+# 复现 prompt（直接 clone，所有模型本机 GPU 复现，不用 Modal）
 
-> 把这一整份交给内部环境里的工程师或 agent。它在自己的 GPU 机器上重跑 090 / 030 两个工位的完整流程，
-> 结果要和 2026-10-07 已发布的报告对上（验收数字在最后）。没有 Modal、没有外网也能跑（离线包见 §3）。
-> 只有一处需要你给的东西：Hugging Face token（`HF_TOKEN`，只在拉权重那一步用，不进代码、不进日志）。
+> 把这份原样交给内部环境的工程师或 agent。两个仓库的 `main` 分支已经包含代码、冻结的输入数据、权重校验和与运行脚本；
+> 只需要：一台有 GPU（≥ 24 GB；SAM 3D Objects 用过 A100-80GB）的 Linux 机器、Python 3.11/3.12、Postgres 16、一个 Hugging Face token。
+> 流程和已发布的报告完全一样，唯一不同是 GPU 在你那边（`scripts/onprem/run_stage.py` 让每个 Modal 应用在本进程跑）。
 
-## 0. 你要做什么
+## 1. clone（两个仓库，都是 main）
 
-同一条工程流程（S1–S14，`module-swap-090/RUNBOOK.md`），三处模块换成可商用版本：
-
-| 模块 | 原来 | 现在 | 许可 |
-|---|---|---|---|
-| S2 几何 | Pi3X（CC BY-NC） | MVS：DA3-BASE 起始 → RoMa v1 outdoor 稠密匹配 → numpy LM 光束法平差（`ba_scipy`，无 GPL）→ 两视图三角化（CERT 0.05）；然后 **掩码内补洞**：MoGe-3 单目深度按每张照片全局比例 + 每个物体局部偏移场对齐（`fill_geometry.py`） | Apache-2.0 / MIT / BSD-3 |
-| S4 补全 | RecGen（TRI 非商用） | SAM 3D Objects，每张有掩码的照片各生成一个候选，按全部照片一致性择优（`completion_ab.py --stage sam3d` + `compare.py`） | SAM License（禁核、军工、ITAR；要向客户确认） |
-| S5 组装 | 轮廓 + 边界 + 深度 | 同上 + **地面接触罚项**（`assemble_lucida_scene.floor_penalty`：最低点 0.5 百分位低于地面就罚，/ 物体高度，权重 2，只罚下沉） | 自有 |
-
-其余各步（冻结、掩码、报告、平台导入、形状校验、地面、直线、平面立体、投影补掩码、跨视角、下沿、盒子、G1–G8）原样。
-
-## 1. 代码（两个仓库，各一个分支）
-
-| 仓库 | 分支 | 内容 |
-|---|---|---|
-| `admin-wekruit/panoptes-serving` | `feat/module-swap-2026-10-07` | `scripts/research/assemble_lucida_scene.py`（组装 v2），`scripts/research/build_capture_report.py`，`scripts/research/generate_sam3d_assets.py`（SAM 3D 在进程内，无 Modal），`research/module-swap-2026-10-07/`（本次全部脚本、表、说明：`module-swap-090/`，`geometry-backbone-ab/`（MVS 路线 + 公平评判器），`geometry-licence-ab-fair/`，`licence-clean-stack/licences.md`（许可清单与权重 sha256），`completion-licence-ab/completion_ab.py`，`completion-ab-090/compare.py`，`platform/publish-swap-20261007.py`） |
-| `admin-wekruit/ehs-spatial` | `codex/workcell-photo-speed` | 平台 + 检查模块 + 离线套件：`scripts/onprem/`（`run_stage.py`、`fetch_weights*.py`、`airgap.sh`、`modal_stub/`），`scripts/workcell_checks/*.py`（floor / lines / plane_stereo / transfer / clearance / lower_edge / box_faces / obvious_errors / plane_facets），`scripts/workcell_shape_check.py`，`modal_apps/{sam3d_research.py, assemble_scene.py（在 serving）, workcell_layer_trial.py, geometry_clean_ab.py, bundle_adjust.py, publication_site.py}`，`docker/*.Dockerfile`，`web/`（查看器） |
-
-脚本里的绝对路径（`/private/tmp/claude-501/.../scratchpad`、`/Users/adam/...`）是这台 Mac 的；每个脚本顶部的 `SP / RN / SERV / PLAT / WT` 常量改成你的目录即可，别的不用动。
-
-## 2. 数据（不在 git 里，要拷过去）
-
-| 目录 | 是什么 |
-|---|---|
-| `panoptes-serving/outputs/candidate-evaluation/lucida-replica-01/` | 090：3 张照片、冻结的 518 规范帧与 alpha、SAM 3 掩码（`evidence/objects/<物体>/<帧>/{mask.png, canonical_mask.npy}`）、地面掩码、RecGen 生成结果（原版对照用）、`manifest.json` |
-| `panoptes-serving/outputs/candidate-evaluation/bor1-030-01/` | 030：同上，2 张照片 |
-| `scratchpad/checks/da3fair-data/` | 公平评判器的固定输入：急停照片与种子、现场值、地面掩码、旧报告视图（`fair_ab_modal.build_data` 生成的那份） |
-| `scratchpad/checks/clean-gpu/{090,030}/` | 可选：已算好的 RoMa 匹配 / 稠密 warp（`roma-*.npz`、`dense-*.npz`）和 MoGe-3 深度（`moge-frame_*.npz`）。不拷就在你的 GPU 上重算（§4 S2） |
-| `panoptes-platform/.platform/{estop-scale-20261004/plan.json, cell030-20261005/estop-scale-v4.json}` 与 `scratchpad/mvs090/estop-scale2.json`、`scratchpad/mvs030/estop-scale.json` | 急停尺度文件（Pi3X 世界用已发布标定；MVS 世界用公平评判器自己的急停拟合） |
-| `research-notes/workcell-lower-edge-2026-10-05/090-part-masks.json`、`scratchpad/sept/new-view.json`、`scratchpad/checks/cd84-view.json` | S11 下沿的点击部件掩码（只有 090）与已发布报告的视图（实体 ↔ 物体对应） |
-
-现场值（只做验收，**永远不是输入**）：090 右罩壳下沿 24 cm、右围栏下横杆 20 cm；030 左右罩壳下沿各 24 cm；急停红钮 4 cm、黄体 8 cm、高 10 cm。
-
-## 3. 环境与权重
-
-- GPU：SAM 3D Objects 用了 A100-80GB（每个候选 ~10 s，权重 12 GB）；RoMa / DA3-BASE / MoGe-3 在 L4（24 GB）够。CPU 步骤 8 核 16 GB。
-- 镜像：`ehs-spatial/docker/*.Dockerfile`（`panoptes-workcell-cpu`、`panoptes-workcell-gpu`、`sam3d`、`geometry` 等，依赖版本都 hash 固定）。离线：`scripts/onprem/airgap.sh save/load/wheelhouse`。
-- 权重（只拉一次，之后 `HF_HUB_OFFLINE=1`）：
-  ```bash
-  # 在 ehs-spatial 检出里；HF_TOKEN 只在这两条命令的进程里，不写文件
-  export HF_TOKEN=<你的新 token>            # 先在 HF 网页接受 facebook/sam-3d-objects 和 facebook/sam3 的许可
-  python scripts/onprem/fetch_weights.py --cache /weights            # SAM 3（掩码只有在新照片上才需要；本次复现用冻结掩码，可跳）
-  python scripts/onprem/fetch_weights_sam3d.py --cache /weights      # SAM 3D Objects @2e73555 + DINOv2 ViT-L/14 reg4
-  python scripts/onprem/fetch_weights_geometry.py --cache /weights   # RoMa outdoor + DINOv2（sha256 见 licences.md）
-  python scripts/onprem/fetch_weights_da3.py --cache /weights        # DA3-BASE @f4a6c9b
-  # MoGe-3：Ruicheng/moge-3-vitl@184008f（公开，不需要 token）
-  python scripts/onprem/fetch_weights_sam3d.py --cache /weights --verify
-  unset HF_TOKEN
-  ```
-- 不要用：Pi3X、RecGen、DA3-LARGE、pycolmap 轮子（含 GPL 代码）。清单：`licence-clean-stack/licences.md`。
-
-## 4. 跑（按步；每步的输出目录就是下一步的输入）
-
-所有 "modal run X.py --flags" 在内部环境都换成 `python scripts/onprem/run_stage.py --weights /weights X.py --flags`：
-Modal 装饰器被桩替换，函数体在本进程跑，不联网。
-
-**S1 冻结 + S3 掩码**：直接用拷过来的运行目录（已冻结、掩码已有）。新照片才需要 `prepare_capture_evidence.py freeze` 和 SAM 3。
-
-**S2 几何（GPU 一次，之后 CPU）**
-1. RoMa 匹配 + DA3-BASE 起始深度 + MoGe-3 深度 → `checks/clean-gpu/<cell>/`：`geometry-backbone-ab/prod_route_modal.py` 的 route 阶段（函数体 = `ehs-spatial/modal_apps/geometry_clean_ab.py` 的 `roma_model` / `refine` / `mvs`）。
-2. `python geometry-backbone-ab/mvs_route.py da3-base`（CPU，numpy）→ `checks/bbab-geom/<cell>-mvs-da3-base-padded/geometry`。
-3. 公平评判器 + 导出：`python geometry-backbone-ab/backbone_ab_modal.py analyse <cell>-mvs-da3-base-padded`，`... export mvs-da3-base <cell>` → `checks/bbab-export-<cell>-mvs-scipyba`（名字按脚本里的常量）。
-4. 补洞：`FILL_CELL=<cell> python module-swap-090/fill_geometry.py` → `checks/bbab-geom/<cell>-mvs-fill-padded`；再 `backbone_ab_modal.py analyse <cell>-mvs-fill-padded`、`export mvs-fill <cell>` → `checks/bbab-export-<cell>-mvs-fill`。
-5. 门：`python module-swap-090/field_values_fill.py`：现场值与不补洞的 MVS 行相同（090 24.0 / 21.0；030 23.6 / 24.6），急停尺度逐位相同。不同 = 补洞碰了不该碰的像素，停。
-
-**S4 补全（GPU）**
 ```bash
-cd completion-licence-ab
-AB_CELL=<cell> AB_RUN=checks/bbab-export-<cell>-mvs-fill AB_OUT=swap-runs/<cell>/mvs-fill-ab AB_FRAME=all \
-  python scripts/onprem/run_stage.py --weights /weights completion_ab.py --stage sam3d          # 每张有掩码的照片一个候选
-AB_CELL=<cell> AB_RUN=... AB_OUT=... python .../run_stage.py completion_ab.py --stage assemble --variants sam3d,sam3d-frame_0001,...   # 只列有内容的目录
-cd ../completion-ab-090
-CMP_NOTES=cmp-<cell>-mvs-fill CMP_SCALE=<该几何的急停尺度 json> AB_CELL=<cell> AB_RUN=... AB_OUT=... python compare.py <物体 id...>   # 择优 + 逐物体对比图
-python module-swap-090/swap_generation.py <变体>      # 选中的候选落成 generation/<物体>/{object.ply, posed-object.ply, output.json}
-python module-swap-090/pin_run.py swap-runs/<变体>    # 平台导入要的 sha256 pin + point_cloud.glb
+git clone https://github.com/admin-wekruit/panoptes-serving.git
+git clone https://github.com/admin-wekruit/ehs-spatial.git        # 平台 + 检查模块 + 离线套件（scripts/onprem）
 ```
-（SAM 3D 的输入 = 照片 + 掩码 + 本几何点图；`generate_sam3d_assets.py --completion sam3d` 是单候选的生产入口，等价。）
+运行环境就是 `ehs-spatial/docker/` 里的镜像（依赖全部 hash 固定）：`workcell-cpu.Dockerfile`（组装、报告、检查）、`workcell-gpu.Dockerfile`、`sam3d.Dockerfile`（SAM 3D Objects @f91db41，torch 2.4 cu121）、`geometry.Dockerfile` + `geometry-requirements.txt`（RoMa / DA3 / MoGe-3，torch 2.5.1）。
+两条路：`docker build -f ehs-spatial/docker/<x>.Dockerfile`（上下文按 `scripts/onprem/stage_context.sh` 准备，离线用 `scripts/onprem/airgap.sh`），或者在一个 Python 3.11 venv 里 `pip install -r ehs-spatial/docker/geometry-requirements.txt` 再按 `sam3d.Dockerfile` 的 pip 行装 SAM 3D 的依赖。`panoptes-serving` 本身没有 requirements 文件，它的脚本用的就是这些环境。
+`panoptes-serving/research/module-swap-2026-10-07/` 里有：`notes/`（全部脚本，和发布时逐字节相同，只是机器路径改成环境变量）、`data/`（冻结输入：两个工位的照片、518 规范帧、SAM 3 掩码、地面掩码、公平评判器的固定输入、急停尺度文件、RoMa / DA3-BASE / MoGe-3 的 GPU 中间结果、MVS 导出；共 0.5 GB）、`env.sh`、`run_all.sh`、`platform/publish-swap-20261007.py`。
 
-**S5 组装 v2（CPU）**：`python scripts/onprem/run_stage.py panoptes-serving/modal_apps/assemble_scene.py --run swap-runs/<变体>` → `result/comparisons.json`（每个物体 `refinement.final.floor.lowest_native` 应 ≥ −0.02 原生单位；`floor_contact.weight` = 2）。
+## 2. 环境变量（一次）
 
-**S6 报告**：`python scripts/research/build_capture_report.py --run swap-runs/<变体> --label "<标题>"` → `public/scene.json`。
+```bash
+cd panoptes-serving
+export PANOPTES_WORKCELL=$PWD/../ehs-spatial       # 平台和检查模块都在这一个检出里（main）
+export PG=/usr/lib/postgresql/16/bin               # pg_ctl / pg_isready 的目录
+source research/module-swap-2026-10-07/env.sh      # 其余变量从这里来：SWAP_SCRATCH=.../data，MODAL_RUN=本机 on-prem runner
+```
+`env.sh` 的默认就是"本机 GPU、不用 Modal"：`MODAL_RUN="$PY $PANOPTES_WORKCELL/scripts/onprem/run_stage.py --weights $WEIGHTS"`。
+每个 `modal run APP.py --flags` 都经它变成本进程调用：Modal 装饰器被 `scripts/onprem/modal_stub` 替换，函数体在本机跑，不联网（`run_stage.py --self-test` 可自检）。
 
-**S7 平台导入 + 导出**：平台数据库（Postgres；`.platform/identity-runtime-env.json` 指向它）跑着：`python platform/publish-swap-20261007.py <变体> swap-runs/<变体> <急停尺度 json> "<标题>"` → `.platform/publication-catalog/<id>` + `view.json`。
+平台数据库（S7 导入 / 导出要）：建一个空 Postgres 16 库，写 `ehs-spatial/.platform/identity-runtime-env.json`，四个键：`PANOPTES_DATABASE_URL`（你的库）、`PANOPTES_BLOB_ROOT`（任一可写目录）、`PANOPTES_BLENDER_EXECUTABLE`（可填空串，本流程不用）、`PANOPTES_PAID_BUDGET_USD`（`0`）。`.platform/` 已在 `.gitignore`。
 
-**S8–S14 检查**：`python module-swap-090/serve_export.py <变体>`，然后 `STAGES_CELL=<cell> python module-swap-090/run_stages.py <变体>`（内部用 `workcell_layer_trial.py` 跑原检查模块；on-prem 同样走 `run_stage.py`）。
+## 3. 权重（一次；只有这一步需要 token）
 
-**层 + 表**：`python module-swap-090/build_swap_layer.py <变体>` → 查看器的 `measurement-layer/<id>.json`；`compare_json.py` / `compare_layers.py`（090）、`tables_030.py`（030）。
+```bash
+cd $PANOPTES_WORKCELL
+export HF_TOKEN=<你的 token>     # 先在 huggingface.co 接受 facebook/sam-3d-objects 的许可（SAM License：禁核、军工、ITAR）
+python scripts/onprem/fetch_weights_sam3d.py --cache $WEIGHTS       # SAM 3D Objects @2e73555（12.1 GB，mesh-only 文件）+ DINOv2 ViT-L/14 reg4
+python scripts/onprem/fetch_weights_geometry.py --cache $WEIGHTS    # RoMa v1 outdoor + DINOv2 + DA3-BASE @f4a6c9b + MoGe-3 @184008f（都公开；sha256 校验，
+                                                                    #   清单在 notes/licence-clean-stack-2026-10-06/licences.md）
+python scripts/onprem/fetch_weights_sam3d.py --cache $WEIGHTS --verify
+python scripts/onprem/fetch_weights_geometry.py --cache $WEIGHTS --verify
+unset HF_TOKEN
+```
+不要拉、不要用：Pi3X、RecGen、DA3-LARGE、pycolmap 轮子。token 不写进任何文件。
 
-**发布**：`module-swap-090/publish_site.sh <变体...>`（把目录编译成静态站：`scripts/prepare_publication_site.py` + `modal_apps/publication_site.py`；内部环境用自己的静态服务器放 `publication-http/`，查看器 `web/` 指向它）。
+## 4. 跑
 
-## 5. 验收（和 2026-10-07 的数字对）
+```bash
+cd panoptes-serving/research/module-swap-2026-10-07
+./run_all.sh 090      # 约 40 分钟（SAM 3D 25 个候选 ≈ 5 分钟 GPU，其余 CPU）
+./run_all.sh 030      # 约 25 分钟
+```
+每步幂等，中断后重跑接着来。它做的事（和 `notes/module-swap-090-2026-10-07/RUNBOOK.md` 的 S1–S14 一一对应）：
+
+| 步 | 做什么 | GPU |
+|---|---|---|
+| S2a | RoMa 匹配 + DA3-BASE 起始 + MoGe-3 深度（`geometry_clean_ab.py --stage infer/refine/dense-infer`）。**中间结果已在 `data/checks/clean-gpu`、`clean-geom`、`da3fair-geom` 里，默认跳过**；想从照片完全重算就删掉这三个目录再跑 | 是（跳过时否） |
+| S2b | numpy LM 光束法平差 + 两视图三角化（`mvs_route.py da3-base`，CERT 0.05） | 否 |
+| S2c | 公平评判器（地面、急停尺度、现场值；`backbone_ab_modal.py analyse`）+ 导出运行目录 | 否 |
+| S2d | MoGe-3 掩码内补洞（`fill_geometry.py`）→ 再评判 → 导出 → **门：现场值与不补洞一致** | 否 |
+| S4 | SAM 3D Objects 每张有掩码的照片一个候选（`completion_ab.py --stage sam3d`，种子 42）→ 候选组装 → 全照片一致性择优（`compare.py`）→ `generation/` 契约（`swap_generation.py`）→ 导入 pin（`pin_run.py`） | 是 |
+| S5–S6 | 组装 v2（地面接触罚项，`assemble_lucida_scene.py`）→ 报告（`build_capture_report.py`） | 否 |
+| S7 | 平台导入 + 导出发布目录（`publish-swap-20261007.py`） | 否 |
+| S8–S14 | 原检查模块：形状校验、地面、直线、平面立体、投影补掩码、跨视角、下沿、盒子、G1–G8、三视图平面（`run_stages.py`） | 否 |
+| 层 / 表 | `build_swap_layer.py`（查看器的测量层）；`compare_json.py` / `compare_layers.py`（090）、`tables_030.py`（030） | 否 |
+
+看报告：`publish_site.sh` 把导出目录编译成静态站（`scripts/prepare_publication_site.py`）；内部用任意静态服务器放 `publication-http/`，查看器 `ehs-spatial/web`（已构建的在 Pages 仓库 `admin-wekruit/panoptes-workcell-report` 的 `workcell-photo-direct/report/`）指向它，测量层放 `measurement-layer/<发布 id>.json`。
+
+## 5. 验收（和 2026-10-07 发布的数字对）
 
 | 项 | 090 | 030 |
 |---|---|---|
-| 几何层现场值（MVS + 补洞） | 右罩壳 24.0，右横杆 21.0；4 值 MAE 0.50 cm | 左 23.6，右 24.6 |
+| 补洞记录（`data/checks/bbab-geom/<cell>-mvs-fill-padded/fill-record.json`） | 25 条，补 48722 像素，与仓库里的逐字节相同 | `fill-record.json` |
+| 几何层现场值（MVS + 补洞） | 右罩壳 24.0，右横杆 21.0；4 值 MAE 0.50 cm，最大 0.99 | 左 23.6，右 24.6 |
 | 急停尺度（m / 原生） | 3.2371372 | 3.5616493 |
-| 掩码内点图覆盖率（补洞前 → 后，9 / 8 物体均值） | 0.55 → 0.85 | 见 `fill-record.json` |
 | 组装 v2 后最低点 < −2 cm 的物体 | 0 | 0 |
-| G1–G8 明显错误物体（可商用组合） | 0 | 1（防护板，已知） |
-| 轮廓 IoU 均值（可商用组合） | 0.823 | 0.762 |
-| 浮点差异容忍 | 现场值 ±0.1 cm；IoU ±0.01；SAM 3D 种子 42 固定，仍可能有 ±0.02 的候选差异（则择优结果可能换照片，记下来） | 同 |
+| G1–G8 明显错误物体 | 0 | 1（防护板，已知） |
+| 轮廓 IoU 均值 | 0.823 | 0.762 |
+| 容忍 | 现场值 ±0.1 cm；IoU ±0.01；SAM 3D 固定种子仍可能有 ±0.02 的候选差异，择优可能换照片——记下来，不算失败 | 同 |
 
-已知问题，不是复现失败：防护板（折板）SAM 3D 两个工位都做不好 → 测量盒或 S10 三视图平面重定深；报告级 G1 地面覆盖 75 %（平台侧地面面片）；030 右围栏 / 右防撞柱只有 1 张照片有掩码，悬空 8–26 cm。
+已知问题，不是复现失败：防护板（折板）SAM 3D 两个工位都做不好；报告级 G1 地面覆盖 75 %（平台侧地面面片）；030 右围栏 / 右防撞柱只有 1 张照片有掩码，悬空 8–26 cm。
 
-## 6. 不要做的事
+## 6. 规则
 
-- 不改公平评判器、组装、检查模块的代码来"对上数字"。对不上就把差异记下来。
-- 现场值不进任何输入。
-- HF token 不写进仓库、镜像、日志；拉完权重 `unset`。
-- Pi3X / RecGen 只作内部对照，不进交付。
+- 不改评判器、组装、检查模块的代码来"对上数字"；对不上就记差异。
+- 现场值（24 / 20 / 24 / 24 cm，急停 4 / 8 / 10 cm）只做验收，不进任何输入。
+- Pi3X / RecGen 不进交付（仓库里也没有它们的输出；原版的数字在 `notes/module-swap-090-2026-10-07/{table.md, layers-table.md}`）。
+- 已发布的报告（4b58dbd2、cd84d3fb、25686138）不动。
