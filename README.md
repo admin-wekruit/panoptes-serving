@@ -1,3 +1,8 @@
+> **Moved (2026-10-07).** This repository is frozen. Everything here — the GPU model services, the module-swap pipeline, the
+> handoff, the frozen data — now lives in **https://github.com/admin-wekruit/ehs-spatial** (branch `main`), one repository for the
+> platform, the checks, the services and the pipeline. Start there: `HANDOFF.md`. The services deployed from this repository
+> (sam3 :8801, mapanything :8802, moge :8803) are unchanged in `serving/` of ehs-spatial.
+
 # EHS Spatial MVP
 
 A local, single-process inspection workbench that turns exactly four workcell
